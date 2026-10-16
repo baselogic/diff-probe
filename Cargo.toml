@@ -1,0 +1,13 @@
+[package]
+name = "diff-probe"
+version = "0.2.3"
+edition = "2024"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

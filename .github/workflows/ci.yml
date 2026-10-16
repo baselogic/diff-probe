@@ -1,0 +1,86 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update stable Rust
+        run: rustup update stable
+        shell: bash
+      - name: Check host architecture
+        shell: bash
+        run: |
+          rustc -vV
+          rustc -vV | grep -F "host: ${{ matrix.target }}"
+      - name: Check and test
+        shell: bash
+        env:
+          RUSTFLAGS: -F dead_code
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --all-targets --locked
+          cargo test --release --all-targets --locked
+          cargo clippy --all-targets --locked -- -W clippy::pedantic -W clippy::nursery
+          cargo build --release --locked
+      - name: Package Windows binary
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $archive = "dist/diff-probe-${env:GITHUB_REF_NAME}-windows-x64.zip"
+          Compress-Archive -LiteralPath 'target/release/diff-probe.exe' -DestinationPath $archive
+      - name: Package Unix binary
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          case "$RUNNER_OS" in
+            Linux) platform=linux-x64 ;;
+            macOS) platform=macos-arm64 ;;
+            *) exit 1 ;;
+          esac
+          tar -czf "dist/diff-probe-${GITHUB_REF_NAME}-${platform}.tar.gz" -C target/release diff-probe
+      - name: Upload release archive
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download native archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "diff-probe $GITHUB_REF_NAME" --notes "Native release builds for Windows x64, Linux x64 (glibc), and macOS Apple Silicon."
